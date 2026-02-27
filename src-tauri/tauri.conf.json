@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "CSV → SAV 转换工具",
-        "width": 720,
-        "height": 560
+        "width": 860,
+        "height": 720
       }
     ],
     "security": {

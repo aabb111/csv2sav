@@ -1,7 +1,5 @@
 export type FileStatus = "pending" | "converting" | "success" | "error";
 
-export type OutputFormat = "sav" | "zsav";
-
 export interface ConvertFile {
   id: string;
   inputPath: string;

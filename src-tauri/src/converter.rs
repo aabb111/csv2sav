@@ -10,7 +10,6 @@ use pspp::data::{ByteString, Datum};
 use pspp::dictionary::Dictionary;
 use pspp::identifier::Identifier;
 use pspp::sys::WriteOptions;
-use pspp::sys::raw::records::Compression;
 use pspp::variable::{VarWidth, Variable};
 
 use crate::schema::{ColType, CsvSchema};
@@ -71,20 +70,12 @@ pub fn convert_csv_to_sav(
     input: &Path,
     output: &Path,
     schema: &CsvSchema,
-    use_zlib: bool,
     cancelled: &AtomicBool,
     on_progress: &dyn Fn(usize, u64, u64),
 ) -> Result<usize, String> {
     let dict = build_dictionary(schema)?;
 
-    let compression = if use_zlib {
-        Some(Compression::ZLib)
-    } else {
-        Some(Compression::Simple)
-    };
-
     let mut writer = WriteOptions::new()
-        .with_compression(compression)
         .write_file(&dict, output)
         .map_err(|e| format!("Failed to create SAV file: {e}"))?;
 

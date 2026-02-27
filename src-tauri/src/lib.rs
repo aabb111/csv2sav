@@ -54,7 +54,6 @@ async fn convert_csv_to_sav(
     app: AppHandle,
     input_path: String,
     output_path: String,
-    use_zlib: bool,
 ) -> Result<ConvertResult, String> {
     let cancel_flag = app
         .try_state::<CancelFlag>()
@@ -84,7 +83,6 @@ async fn convert_csv_to_sav(
             input_p,
             output_p,
             &csv_schema,
-            use_zlib,
             &cancelled,
             &|current_rows, bytes_read, file_size| {
                 emit_progress(&app, &file_name, current_rows, bytes_read, file_size);

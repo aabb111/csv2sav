@@ -2,14 +2,13 @@ import { useState, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
-import type { ConvertFile, ConvertProgress, ConvertResult, OutputFormat } from "@/types";
+import type { ConvertFile, ConvertProgress, ConvertResult } from "@/types";
 
 let nextId = 0;
 
 export function useConvert() {
   const [files, setFiles] = useState<ConvertFile[]>([]);
   const [converting, setConverting] = useState(false);
-  const [outputFormat, setOutputFormat] = useState<OutputFormat>("sav");
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const cancelledRef = useRef(false);
 
@@ -91,13 +90,11 @@ export function useConvert() {
         )
       );
 
-      const ext = outputFormat === "zsav" ? ".zsav" : ".sav";
-      const filterName = outputFormat === "zsav" ? "SPSS (compressed)" : "SPSS";
-      const defaultOutput = file.inputPath.replace(/\.csv$/i, ext);
+      const defaultOutput = file.inputPath.replace(/\.csv$/i, ".sav");
       const outputPath = await save({
         defaultPath: defaultOutput,
-        filters: [{ name: filterName, extensions: [outputFormat] }],
-        title: `保存 ${file.fileName} 为 ${ext.toUpperCase().slice(1)}`,
+        filters: [{ name: "SPSS", extensions: ["sav"] }],
+        title: `保存 ${file.fileName} 为 SAV`,
       });
 
       if (!outputPath) {
@@ -115,7 +112,6 @@ export function useConvert() {
         const result = await invoke<ConvertResult>("convert_csv_to_sav", {
           inputPath: file.inputPath,
           outputPath,
-          useZlib: outputFormat === "zsav",
         });
 
         setFiles((prev) =>
@@ -162,13 +158,11 @@ export function useConvert() {
     unlistenRef.current?.();
     unlistenRef.current = null;
     setConverting(false);
-  }, [files, outputFormat]);
+  }, [files]);
 
   return {
     files,
     converting,
-    outputFormat,
-    setOutputFormat,
     addFiles,
     removeFile,
     clearFiles,
