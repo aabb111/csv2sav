@@ -4,12 +4,14 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const BUF_SIZE: usize = 256 * 1024;
-const MAX_STRING_WIDTH: u16 = 255;
+/// SPSS Very Long String max: 32767 bytes per logical variable.
+pub const MAX_STRING_WIDTH: usize = 32767;
 
 #[derive(Debug, Clone)]
 pub enum ColType {
     Numeric,
-    String(u16),
+    /// Width in bytes (1..=32767).
+    String(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -44,7 +46,7 @@ impl ColInfo {
         if self.is_numeric {
             ColType::Numeric
         } else {
-            let width = (self.max_byte_len.max(1) as u16).min(MAX_STRING_WIDTH);
+            let width = self.max_byte_len.max(1).min(MAX_STRING_WIDTH);
             ColType::String(width)
         }
     }
@@ -55,6 +57,8 @@ pub struct CsvSchema {
     pub headers: Vec<String>,
     pub col_types: Vec<ColType>,
     pub file_size: u64,
+    /// Column names whose observed values exceed MAX_STRING_WIDTH and will be truncated.
+    pub truncated_cols: Vec<String>,
 }
 
 pub fn infer_schema(
@@ -102,11 +106,19 @@ pub fn infer_schema(
         }
     }
 
+    let truncated_cols: Vec<String> = headers
+        .iter()
+        .zip(&col_infos)
+        .filter(|(_, info)| !info.is_numeric && info.max_byte_len > MAX_STRING_WIDTH)
+        .map(|(h, _)| h.clone())
+        .collect();
+
     let col_types: Vec<ColType> = col_infos.iter().map(|c| c.col_type()).collect();
 
     Ok(CsvSchema {
         headers,
         col_types,
         file_size,
+        truncated_cols,
     })
 }

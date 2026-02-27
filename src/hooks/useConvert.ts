@@ -90,11 +90,11 @@ export function useConvert() {
         )
       );
 
-      const defaultOutput = file.inputPath.replace(/\.csv$/i, ".sav");
+      const defaultOutput = file.inputPath.replace(/\.csv$/i, ".zsav");
       const outputPath = await save({
         defaultPath: defaultOutput,
-        filters: [{ name: "SPSS", extensions: ["sav"] }],
-        title: `保存 ${file.fileName} 为 SAV`,
+        filters: [{ name: "SPSS (compressed)", extensions: ["zsav"] }],
+        title: `保存 ${file.fileName} 为 ZSAV`,
       });
 
       if (!outputPath) {

@@ -19,8 +19,8 @@ const OP_SPACES: u8 = 254;
 #[derive(Debug, Clone)]
 pub enum ColType {
     Numeric,
-    /// Width in bytes, 1–255.
-    String(u16),
+    /// Width in bytes, 1–32767.
+    String(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -36,11 +36,26 @@ pub enum Value {
     String(Vec<u8>),
 }
 
+/// Max width of a single SPSS physical variable for strings.
+const SEG_WIDTH: usize = 255;
+
 /// Number of 8-byte segments a column occupies in the data record.
+///
+/// For Very Long Strings (width > 255), SPSS splits the logical column into
+/// multiple physical variables of up to 255 bytes each.
 fn col_segments(col_type: &ColType) -> usize {
     match col_type {
         ColType::Numeric => 1,
-        ColType::String(w) => ((*w as usize) + 7) / 8,
+        ColType::String(w) => {
+            if *w <= SEG_WIDTH {
+                (w + 7) / 8
+            } else {
+                let remainder = w % SEG_WIDTH;
+                let full_segs = w / SEG_WIDTH;
+                let partial_segs = if remainder == 0 { 0 } else { (remainder + 7) / 8 };
+                full_segs * ((SEG_WIDTH + 7) / 8) + partial_segs
+            }
+        }
     }
 }
 
@@ -87,7 +102,7 @@ impl<W: Write> SavWriter<W> {
                     let segments = col_segments(col_type);
                     let total = segments * 8;
                     let mut buf = vec![b' '; total];
-                    let copy_len = bytes.len().min(*width as usize);
+                    let copy_len = bytes.len().min(*width);
                     buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
                     for chunk in buf.chunks(8) {
                         self.push_string_chunk(chunk)?;
@@ -212,9 +227,10 @@ fn write_header(w: &mut impl Write, row_width: usize) -> io::Result<()> {
 fn write_variable_records(w: &mut impl Write, cols: &[ColDef]) -> io::Result<()> {
     for col in cols {
         let segments = col_segments(&col.col_type);
+        // For VLS, the first physical variable uses min(width, 255) as type_code.
         let type_code: i32 = match &col.col_type {
             ColType::Numeric => 0,
-            ColType::String(width) => *width as i32,
+            ColType::String(width) => (*width).min(SEG_WIDTH) as i32,
         };
         let has_label: i32 = if col.label.is_empty() { 0 } else { 1 };
 
@@ -236,15 +252,40 @@ fn write_variable_records(w: &mut impl Write, cols: &[ColDef]) -> io::Result<()>
             w.write_all(&vec![0u8; pad])?;
         }
 
-        // Continuation segments for long strings.
-        for _ in 1..segments {
-            write_le_i32(w, REC_TYPE_VARIABLE)?;
-            write_le_i32(w, -1)?;
-            write_le_i32(w, 0)?;
-            write_le_i32(w, 0)?;
-            write_le_i32(w, 0)?;
-            write_le_i32(w, 0)?;
-            write_padded(w, "        ", 8)?;
+        // Continuation variable records for strings wider than 8 bytes.
+        // For VLS (width > 255), continuation variables alternate between
+        // 255-byte segments and the remainder.
+        if let ColType::String(width) = &col.col_type {
+            let mut remaining = *width;
+            // First physical variable already written above; advance past it.
+            remaining = remaining.saturating_sub(remaining.min(SEG_WIDTH));
+            while remaining > 0 {
+                let seg_w = remaining.min(SEG_WIDTH);
+                let seg_segs = (seg_w + 7) / 8;
+                // Write one continuation variable record per 8-byte segment of this physical var.
+                for _ in 0..seg_segs {
+                    write_le_i32(w, REC_TYPE_VARIABLE)?;
+                    write_le_i32(w, -1)?;
+                    write_le_i32(w, 0)?;
+                    write_le_i32(w, 0)?;
+                    write_le_i32(w, 0)?;
+                    write_le_i32(w, 0)?;
+                    write_padded(w, "        ", 8)?;
+                }
+                remaining = remaining.saturating_sub(seg_w);
+            }
+            // For strings ≤ 255, write continuation records for remaining 8-byte segments.
+            if *width <= SEG_WIDTH && segments > 1 {
+                for _ in 1..segments {
+                    write_le_i32(w, REC_TYPE_VARIABLE)?;
+                    write_le_i32(w, -1)?;
+                    write_le_i32(w, 0)?;
+                    write_le_i32(w, 0)?;
+                    write_le_i32(w, 0)?;
+                    write_le_i32(w, 0)?;
+                    write_padded(w, "        ", 8)?;
+                }
+            }
         }
     }
     Ok(())
@@ -266,10 +307,62 @@ fn encode_format(col_type: &ColType) -> i32 {
         }
         ColType::String(w) => {
             let type_code: i32 = 1; // A
-            let width: i32 = (*w as i32).min(255);
+            let width: i32 = (*w as i32).min(SEG_WIDTH as i32);
             (type_code << 16) | (width << 8)
         }
     }
+}
+
+/// Convert a SAV file to ZSAV format (zlib-compressed data section).
+///
+/// Reads the SAV file, patches the compression field to 2 (ZLib), then
+/// writes the header+dict verbatim and compresses the data section with zlib.
+pub fn sav_to_zsav(sav_path: &std::path::Path, zsav_path: &std::path::Path) -> io::Result<()> {
+    use flate2::{write::ZlibEncoder, Compression};
+    use std::fs;
+
+    let sav = fs::read(sav_path)?;
+
+    // The compression field is at byte offset 72 (little-endian i32).
+    // We need at least 176 bytes for a valid SAV header.
+    if sav.len() < 176 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "SAV file too small"));
+    }
+
+    // Find the dict terminator (rec_type 999) to split header from data.
+    let data_start = find_data_start(&sav).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "dict terminator not found in SAV")
+    })?;
+
+    let out = fs::File::create(zsav_path)?;
+    let mut out = io::BufWriter::new(out);
+
+    // Write header bytes, patching compression field to 2.
+    let mut header = sav[..data_start].to_vec();
+    header[72..76].copy_from_slice(&2i32.to_le_bytes());
+    out.write_all(&header)?;
+
+    // Compress the data section with zlib.
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&sav[data_start..])?;
+    let compressed = encoder.finish()?;
+    out.write_all(&compressed)?;
+    out.flush()?;
+
+    Ok(())
+}
+
+/// Find the byte offset of the first data byte after the dict terminator record.
+fn find_data_start(buf: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i + 8 <= buf.len() {
+        let rec_type = i32::from_le_bytes(buf[i..i + 4].try_into().ok()?);
+        if rec_type == REC_TYPE_DICT_TERMINATOR as i32 {
+            return Some(i + 8);
+        }
+        i += 1;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -282,7 +375,7 @@ mod tests {
         ColDef { name: name.into(), label: label.into(), col_type: ColType::Numeric }
     }
 
-    fn str_col(name: &str, label: &str, width: u16) -> ColDef {
+    fn str_col(name: &str, label: &str, width: usize) -> ColDef {
         ColDef { name: name.into(), label: label.into(), col_type: ColType::String(width) }
     }
 

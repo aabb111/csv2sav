@@ -5,7 +5,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::sav_writer::{ColDef, ColType, SavWriter, Value};
+use crate::sav_writer::{sav_to_zsav, ColDef, ColType, SavWriter, Value};
 use crate::schema::{ColType as SchemaColType, CsvSchema};
 
 const CSV_BUF_SIZE: usize = 512 * 1024;
@@ -58,6 +58,9 @@ fn make_col_defs(schema: &CsvSchema) -> Vec<ColDef> {
 }
 
 /// on_progress(current_rows, bytes_read, file_size)
+///
+/// Writes a temporary `.sav` file, then converts it to `.zsav` (zlib-compressed).
+/// The temporary `.sav` file is deleted after successful conversion.
 pub fn convert_csv_to_sav(
     input: &Path,
     output: &Path,
@@ -67,8 +70,11 @@ pub fn convert_csv_to_sav(
 ) -> Result<usize, String> {
     let col_defs = make_col_defs(schema);
 
+    // Write to a temporary .sav file first, then compress to .zsav.
+    let tmp_sav = output.with_extension("sav.tmp");
+
     let out_file =
-        File::create(output).map_err(|e| format!("Failed to create output file: {e}"))?;
+        File::create(&tmp_sav).map_err(|e| format!("Failed to create temp SAV file: {e}"))?;
     let buf_writer = BufWriter::new(out_file);
     let mut writer = SavWriter::new(buf_writer, col_defs)
         .map_err(|e| format!("Failed to write SAV header: {e}"))?;
@@ -91,6 +97,7 @@ pub fn convert_csv_to_sav(
 
         if row_count % CANCEL_CHECK_INTERVAL == 0 && cancelled.load(Ordering::Relaxed) {
             drop(writer);
+            let _ = std::fs::remove_file(&tmp_sav);
             let _ = std::fs::remove_file(output);
             return Err("Cancelled".to_string());
         }
@@ -126,6 +133,13 @@ pub fn convert_csv_to_sav(
     writer
         .finish()
         .map_err(|e| format!("Failed to finalize SAV file: {e}"))?;
+
+    // Compress the temp SAV to the final ZSAV output path.
+    sav_to_zsav(&tmp_sav, output)
+        .map_err(|e| format!("Failed to compress SAV to ZSAV: {e}"))?;
+
+    // Clean up the temporary SAV file.
+    let _ = std::fs::remove_file(&tmp_sav);
 
     Ok(row_count)
 }

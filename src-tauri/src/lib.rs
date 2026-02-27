@@ -24,12 +24,15 @@ struct ConvertResult {
     total_rows: usize,
     success: bool,
     error: Option<String>,
+    /// Columns whose values were truncated to 32767 bytes in the output.
+    truncated_cols: Vec<String>,
 }
 
 #[derive(Clone)]
 struct CancelFlag(Arc<AtomicBool>);
 
-const SAMPLE_ROWS: usize = 10_000;
+// Scan all rows to infer schema, avoiding truncation from undersampling.
+const SAMPLE_ROWS: usize = usize::MAX;
 
 fn emit_progress(app: &AppHandle, file: &str, current_rows: usize, bytes_read: u64, file_size: u64) {
     let _ = app.emit(
@@ -78,6 +81,7 @@ async fn convert_csv_to_sav(
         }
 
         let file_size = csv_schema.file_size;
+        let truncated_cols = csv_schema.truncated_cols.clone();
         emit_progress(&app, &file_name, 0, 0, file_size);
 
         let actual_rows = converter::convert_csv_to_sav(
@@ -92,18 +96,19 @@ async fn convert_csv_to_sav(
 
         emit_progress(&app, &file_name, actual_rows, file_size, file_size);
 
-        Ok::<_, String>(actual_rows)
+        Ok::<_, String>((actual_rows, truncated_cols))
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?;
 
     match result {
-        Ok(total_rows) => Ok(ConvertResult {
+        Ok((total_rows, truncated_cols)) => Ok(ConvertResult {
             input_path,
             output_path,
             total_rows,
             success: true,
             error: None,
+            truncated_cols,
         }),
         Err(e) if e == "Cancelled" => Ok(ConvertResult {
             input_path,
@@ -111,6 +116,7 @@ async fn convert_csv_to_sav(
             total_rows: 0,
             success: false,
             error: Some("已取消".to_string()),
+            truncated_cols: vec![],
         }),
         Err(e) => Ok(ConvertResult {
             input_path,
@@ -118,6 +124,7 @@ async fn convert_csv_to_sav(
             total_rows: 0,
             success: false,
             error: Some(e),
+            truncated_cols: vec![],
         }),
     }
 }
