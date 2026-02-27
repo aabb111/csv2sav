@@ -54,9 +54,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v__VERSION__
-          releaseName: "csv2sav v__VERSION__"
+          tagName: ${{ github.ref_name }}
+          releaseName: "csv2sav ${{ github.ref_name }}"
           releaseBody: "CSV to SPSS SAV converter"
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
