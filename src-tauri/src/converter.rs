@@ -1,18 +1,12 @@
 use std::cell::Cell;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, BufWriter, Read};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use encoding_rs::UTF_8;
-use pspp::data::{ByteString, Datum};
-use pspp::dictionary::Dictionary;
-use pspp::identifier::Identifier;
-use pspp::sys::WriteOptions;
-use pspp::variable::{VarWidth, Variable};
-
-use crate::schema::{ColType, CsvSchema};
+use crate::sav_writer::{ColDef, ColType, SavWriter, Value};
+use crate::schema::{ColType as SchemaColType, CsvSchema};
 
 const CSV_BUF_SIZE: usize = 512 * 1024;
 const PROGRESS_INTERVAL: usize = 10_000;
@@ -42,27 +36,25 @@ impl<R: Read> Read for CountingReader<R> {
     }
 }
 
-fn build_dictionary(schema: &CsvSchema) -> Result<Dictionary, String> {
-    let mut dict = Dictionary::new(UTF_8);
-
-    for (i, (header, col_type)) in schema.headers.iter().zip(&schema.col_types).enumerate() {
-        let var_name = format!("V{}", i + 1);
-        let width = match col_type {
-            ColType::Numeric => VarWidth::Numeric,
-            ColType::String(len) => VarWidth::String(*len),
-        };
-
-        let id = Identifier::new(var_name.clone())
-            .map_err(|e| format!("Invalid variable name {var_name}: {e}"))?;
-
-        let mut var = Variable::new(id, width, UTF_8);
-        var.label = Some(header.clone());
-
-        dict.add_var(var)
-            .map_err(|e| format!("Failed to add variable {var_name}: {e:?}"))?;
-    }
-
-    Ok(dict)
+fn make_col_defs(schema: &CsvSchema) -> Vec<ColDef> {
+    schema
+        .headers
+        .iter()
+        .zip(&schema.col_types)
+        .enumerate()
+        .map(|(i, (header, col_type))| {
+            let name = format!("V{}", i + 1);
+            let sav_type = match col_type {
+                SchemaColType::Numeric => ColType::Numeric,
+                SchemaColType::String(w) => ColType::String(*w),
+            };
+            ColDef {
+                name,
+                label: header.clone(),
+                col_type: sav_type,
+            }
+        })
+        .collect()
 }
 
 /// on_progress(current_rows, bytes_read, file_size)
@@ -73,11 +65,13 @@ pub fn convert_csv_to_sav(
     cancelled: &AtomicBool,
     on_progress: &dyn Fn(usize, u64, u64),
 ) -> Result<usize, String> {
-    let dict = build_dictionary(schema)?;
+    let col_defs = make_col_defs(schema);
 
-    let mut writer = WriteOptions::new()
-        .write_file(&dict, output)
-        .map_err(|e| format!("Failed to create SAV file: {e}"))?;
+    let out_file =
+        File::create(output).map_err(|e| format!("Failed to create output file: {e}"))?;
+    let buf_writer = BufWriter::new(out_file);
+    let mut writer = SavWriter::new(buf_writer, col_defs)
+        .map_err(|e| format!("Failed to write SAV header: {e}"))?;
 
     let csv_file =
         File::open(input).map_err(|e| format!("Failed to open CSV for conversion: {e}"))?;
@@ -87,16 +81,7 @@ pub fn convert_csv_to_sav(
 
     let col_types = &schema.col_types;
     let col_count = col_types.len();
-
-    let mut datums: Vec<Datum<ByteString>> = Vec::with_capacity(col_count);
-    let mut pad_bufs: Vec<Vec<u8>> = col_types
-        .iter()
-        .map(|ct| match ct {
-            ColType::Numeric => Vec::new(),
-            ColType::String(max_len) => vec![b' '; *max_len as usize],
-        })
-        .collect();
-
+    let mut row_values: Vec<Value> = Vec::with_capacity(col_count);
     let mut row_count = 0usize;
 
     for result in reader.records() {
@@ -110,38 +95,28 @@ pub fn convert_csv_to_sav(
             result.map_err(|e| format!("CSV read error at row {}: {e}", row_count + 1))?;
         row_count += 1;
 
-        datums.clear();
+        row_values.clear();
         for (i, col_type) in col_types.iter().enumerate() {
-            let field = record.get(i).unwrap_or("");
-            let trimmed = field.trim();
-
-            let datum = match col_type {
-                ColType::Numeric => {
-                    if trimmed.is_empty() {
-                        Datum::Number(None)
+            let field = record.get(i).unwrap_or("").trim();
+            let value = match col_type {
+                SchemaColType::Numeric => {
+                    if field.is_empty() {
+                        Value::Number(None)
                     } else {
-                        match trimmed.parse::<f64>() {
-                            Ok(n) => Datum::Number(Some(n)),
-                            Err(_) => Datum::Number(None),
+                        match field.parse::<f64>() {
+                            Ok(n) => Value::Number(Some(n)),
+                            Err(_) => Value::Number(None),
                         }
                     }
                 }
-                ColType::String(max_len) => {
-                    let target_len = *max_len as usize;
-                    let buf = &mut pad_bufs[i];
-                    buf.fill(b' ');
-                    let bytes = trimmed.as_bytes();
-                    let copy_len = bytes.len().min(target_len);
-                    buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
-                    Datum::String(ByteString(buf.clone()))
-                }
+                SchemaColType::String(_) => Value::String(field.as_bytes().to_vec()),
             };
-            datums.push(datum);
+            row_values.push(value);
         }
 
         writer
-            .write_case(datums.drain(..))
-            .map_err(|e| format!("Failed to write case {}: {e}", row_count))?;
+            .write_row(&row_values)
+            .map_err(|e| format!("Failed to write row {}: {e}", row_count))?;
 
         if row_count % PROGRESS_INTERVAL == 0 {
             on_progress(row_count, bytes_counter.get(), schema.file_size);
