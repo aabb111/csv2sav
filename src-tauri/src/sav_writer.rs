@@ -271,3 +271,277 @@ fn encode_format(col_type: &ColType) -> i32 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn num_col(name: &str, label: &str) -> ColDef {
+        ColDef { name: name.into(), label: label.into(), col_type: ColType::Numeric }
+    }
+
+    fn str_col(name: &str, label: &str, width: u16) -> ColDef {
+        ColDef { name: name.into(), label: label.into(), col_type: ColType::String(width) }
+    }
+
+    fn build(cols: Vec<ColDef>, rows: Vec<Vec<Value>>) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut w = SavWriter::new(&mut buf, cols).unwrap();
+        for row in rows {
+            w.write_row(&row).unwrap();
+        }
+        w.finish().unwrap();
+        buf
+    }
+
+    // Parse a little-endian i32 from a byte slice at the given offset.
+    fn read_i32(buf: &[u8], offset: usize) -> i32 {
+        i32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn read_f64(buf: &[u8], offset: usize) -> f64 {
+        f64::from_le_bytes(buf[offset..offset + 8].try_into().unwrap())
+    }
+
+    // ── header ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn header_magic_bytes() {
+        let buf = build(vec![num_col("V1", "")], vec![]);
+        assert_eq!(&buf[0..4], b"$FL2");
+    }
+
+    #[test]
+    fn header_layout_code_is_2() {
+        let buf = build(vec![num_col("V1", "")], vec![]);
+        // layout_code is at offset 64 (4 magic + 60 prod_name)
+        assert_eq!(read_i32(&buf, 64), 2);
+    }
+
+    #[test]
+    fn header_compression_is_1() {
+        let buf = build(vec![num_col("V1", "")], vec![]);
+        // compression at offset 72 (64 + 4 layout + 4 case_size)
+        assert_eq!(read_i32(&buf, 72), 1);
+    }
+
+    #[test]
+    fn header_bias_is_100() {
+        let buf = build(vec![num_col("V1", "")], vec![]);
+        // bias at offset 84 (72 + 4 compression + 4 weight + 4 ncases)
+        assert_eq!(read_f64(&buf, 84), 100.0);
+    }
+
+    #[test]
+    fn header_nominal_case_size_numeric() {
+        // 2 numeric cols → row_width = 2
+        let buf = build(vec![num_col("V1", ""), num_col("V2", "")], vec![]);
+        assert_eq!(read_i32(&buf, 68), 2);
+    }
+
+    #[test]
+    fn header_nominal_case_size_string() {
+        // String(8) → 1 segment, String(9) → 2 segments → row_width = 3
+        let buf = build(
+            vec![str_col("V1", "", 8), str_col("V2", "", 9)],
+            vec![],
+        );
+        assert_eq!(read_i32(&buf, 68), 3);
+    }
+
+    // ── col_segments ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn col_segments_numeric_is_1() {
+        assert_eq!(col_segments(&ColType::Numeric), 1);
+    }
+
+    #[test]
+    fn col_segments_string_rounds_up() {
+        assert_eq!(col_segments(&ColType::String(1)), 1);
+        assert_eq!(col_segments(&ColType::String(8)), 1);
+        assert_eq!(col_segments(&ColType::String(9)), 2);
+        assert_eq!(col_segments(&ColType::String(16)), 2);
+        assert_eq!(col_segments(&ColType::String(17)), 3);
+    }
+
+    // ── compression opcodes ──────────────────────────────────────────────────
+
+    /// Find the start of the data section (after dict terminator record).
+    /// Dict terminator = rec_type 999 (i32) + filler 0 (i32) = 8 bytes.
+    fn data_offset(buf: &[u8]) -> usize {
+        // Scan for the 999 record type marker.
+        let mut i = 0;
+        while i + 4 <= buf.len() {
+            if read_i32(buf, i) == 999 {
+                return i + 8; // skip rec_type + filler
+            }
+            i += 1;
+        }
+        panic!("dict terminator not found");
+    }
+
+    #[test]
+    fn integer_in_range_uses_opcode() {
+        // Value 0.0 → shifted = 100 → opcode 100
+        let buf = build(
+            vec![num_col("V1", "")],
+            vec![vec![Value::Number(Some(0.0))]],
+        );
+        let d = data_offset(&buf);
+        // First opcode block: 8 bytes of opcodes, first opcode = 100
+        assert_eq!(buf[d], 100);
+    }
+
+    #[test]
+    fn missing_numeric_uses_sysmis_opcode() {
+        let buf = build(
+            vec![num_col("V1", "")],
+            vec![vec![Value::Number(None)]],
+        );
+        let d = data_offset(&buf);
+        assert_eq!(buf[d], 255); // OP_SYSMIS
+    }
+
+    #[test]
+    fn float_out_of_range_uses_raw_opcode() {
+        // 1.5 is not an integer → must use OP_RAW (0)
+        let buf = build(
+            vec![num_col("V1", "")],
+            vec![vec![Value::Number(Some(1.5))]],
+        );
+        let d = data_offset(&buf);
+        assert_eq!(buf[d], 0); // OP_RAW
+        // Raw value follows after the 8-opcode block
+        let raw_val = read_f64(&buf, d + 8);
+        assert_eq!(raw_val, 1.5);
+    }
+
+    #[test]
+    fn all_spaces_string_uses_spaces_opcode() {
+        let buf = build(
+            vec![str_col("V1", "", 8)],
+            vec![vec![Value::String(b"        ".to_vec())]],
+        );
+        let d = data_offset(&buf);
+        assert_eq!(buf[d], 254); // OP_SPACES
+    }
+
+    #[test]
+    fn non_space_string_uses_raw_opcode() {
+        let buf = build(
+            vec![str_col("V1", "", 8)],
+            vec![vec![Value::String(b"hello".to_vec())]],
+        );
+        let d = data_offset(&buf);
+        assert_eq!(buf[d], 0); // OP_RAW
+        // Raw 8-byte block: "hello   "
+        assert_eq!(&buf[d + 8..d + 16], b"hello   ");
+    }
+
+    #[test]
+    fn empty_string_uses_spaces_opcode() {
+        let buf = build(
+            vec![str_col("V1", "", 8)],
+            vec![vec![Value::String(vec![])]],
+        );
+        let d = data_offset(&buf);
+        assert_eq!(buf[d], 254); // OP_SPACES — empty string = all spaces
+    }
+
+    // ── opcode block flushing ─────────────────────────────────────────────────
+
+    #[test]
+    fn opcode_block_is_8_bytes() {
+        // 8 numeric columns, all integer values → one full opcode block, no raw data
+        let cols: Vec<ColDef> = (1..=8).map(|i| num_col(&format!("V{i}"), "")).collect();
+        let row: Vec<Value> = (1..=8).map(|_| Value::Number(Some(1.0))).collect();
+        let buf = build(cols, vec![row]);
+        let d = data_offset(&buf);
+        // Exactly 8 opcode bytes, no raw data after
+        assert_eq!(buf.len() - d, 8);
+        // All opcodes = 101 (1.0 + 100)
+        assert!(buf[d..d + 8].iter().all(|&b| b == 101));
+    }
+
+    #[test]
+    fn nine_cols_produce_two_opcode_blocks() {
+        let cols: Vec<ColDef> = (1..=9).map(|i| num_col(&format!("V{i}"), "")).collect();
+        let row: Vec<Value> = (1..=9).map(|_| Value::Number(Some(2.0))).collect();
+        let buf = build(cols, vec![row]);
+        let d = data_offset(&buf);
+        // First block: 8 opcodes = 102 each
+        assert!(buf[d..d + 8].iter().all(|&b| b == 102));
+        // Second block: 8 bytes, first opcode = 102, rest = 0 (unused)
+        assert_eq!(buf[d + 8], 102);
+    }
+
+    // ── variable records ─────────────────────────────────────────────────────
+
+    #[test]
+    fn variable_record_type_is_2() {
+        let buf = build(vec![num_col("V1", "")], vec![]);
+        // Variable record starts right after the 176-byte header.
+        assert_eq!(read_i32(&buf, 176), 2);
+    }
+
+    #[test]
+    fn numeric_col_type_code_is_0() {
+        let buf = build(vec![num_col("V1", "")], vec![]);
+        assert_eq!(read_i32(&buf, 180), 0);
+    }
+
+    #[test]
+    fn string_col_type_code_equals_width() {
+        let buf = build(vec![str_col("V1", "", 10)], vec![]);
+        assert_eq!(read_i32(&buf, 180), 10);
+    }
+
+    #[test]
+    fn label_written_when_present() {
+        let buf = build(vec![num_col("V1", "My Label")], vec![]);
+        // has_label = 1 at offset 184
+        assert_eq!(read_i32(&buf, 184), 1);
+        // label_len at offset 208 (after 6×i32 + 8-byte name)
+        let label_len = read_i32(&buf, 208) as usize;
+        assert_eq!(label_len, 8);
+        assert_eq!(&buf[212..212 + 8], b"My Label");
+    }
+
+    #[test]
+    fn no_label_when_empty() {
+        let buf = build(vec![num_col("V1", "")], vec![]);
+        assert_eq!(read_i32(&buf, 184), 0); // has_label = 0
+    }
+
+    // ── dict terminator ───────────────────────────────────────────────────────
+
+    #[test]
+    fn dict_terminator_record_type_is_999() {
+        let buf = build(vec![num_col("V1", "")], vec![]);
+        let d = data_offset(&buf);
+        // data_offset points past the terminator; go back 8 bytes
+        assert_eq!(read_i32(&buf, d - 8), 999);
+    }
+
+    // ── multiple rows ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn two_rows_produce_correct_opcodes() {
+        // 1 numeric col, 2 rows → 2 values → fits in one 8-opcode block
+        // opcode block: [101, 102, 0, 0, 0, 0, 0, 0]
+        let buf = build(
+            vec![num_col("V1", "")],
+            vec![
+                vec![Value::Number(Some(1.0))],
+                vec![Value::Number(Some(2.0))],
+            ],
+        );
+        let d = data_offset(&buf);
+        // Both values fit in the same 8-opcode block
+        assert_eq!(buf[d], 101); // 1.0 + 100
+        assert_eq!(buf[d + 1], 102); // 2.0 + 100
+    }
+}
