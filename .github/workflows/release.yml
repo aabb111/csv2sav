@@ -50,8 +50,7 @@ jobs:
         run: |
           choco install pkgconfiglite -y
           vcpkg install glib:x64-windows cairo:x64-windows pango:x64-windows
-          $installed = vcpkg path --installed
-          echo "PKG_CONFIG_PATH=$installed/x64-windows/lib/pkgconfig" >> $env:GITHUB_ENV
+          echo "PKG_CONFIG_PATH=C:/vcpkg/installed/x64-windows/lib/pkgconfig" >> $env:GITHUB_ENV
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
