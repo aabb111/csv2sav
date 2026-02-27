@@ -45,6 +45,13 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install gtk4 glib cairo pango
 
+      - name: Install system dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          vcpkg install glib:x64-windows cairo:x64-windows pango:x64-windows
+          echo "PKG_CONFIG_PATH=$(vcpkg path --installed)/x64-windows/lib/pkgconfig" >> "$GITHUB_ENV"
+
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
@@ -60,7 +67,7 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: "csv2sav v__VERSION__"
-          releaseBody: "CSV to SPSS SAV/ZSAV converter"
+          releaseBody: "CSV to SPSS SAV converter"
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
