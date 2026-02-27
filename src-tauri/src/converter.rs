@@ -10,7 +10,7 @@ use crate::schema::{ColType as SchemaColType, CsvSchema};
 
 const CSV_BUF_SIZE: usize = 512 * 1024;
 const PROGRESS_INTERVAL: usize = 10_000;
-const CANCEL_CHECK_INTERVAL: usize = 10_000;
+const CANCEL_CHECK_INTERVAL: usize = 1_000;
 
 struct CountingReader<R> {
     inner: R,
@@ -85,15 +85,15 @@ pub fn convert_csv_to_sav(
     let mut row_count = 0usize;
 
     for result in reader.records() {
+        let record =
+            result.map_err(|e| format!("CSV read error at row {}: {e}", row_count + 1))?;
+        row_count += 1;
+
         if row_count % CANCEL_CHECK_INTERVAL == 0 && cancelled.load(Ordering::Relaxed) {
             drop(writer);
             let _ = std::fs::remove_file(output);
             return Err("Cancelled".to_string());
         }
-
-        let record =
-            result.map_err(|e| format!("CSV read error at row {}: {e}", row_count + 1))?;
-        row_count += 1;
 
         row_values.clear();
         for (i, col_type) in col_types.iter().enumerate() {
