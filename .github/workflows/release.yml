@@ -46,6 +46,10 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
+      - name: Install zlib (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: vcpkg install zlib:x64-windows-static
+
       - name: Install frontend dependencies
         run: pnpm install
 

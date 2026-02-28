@@ -7,6 +7,15 @@ fn main() {
         .include("vendor/readstat/src")
         .include("vendor/readstat/src/spss");
 
+    let is_windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+
+    if is_windows {
+        // On Windows (MSVC) there is no system iconv.
+        // The writer path never calls iconv() with a non-NULL converter,
+        // so a stub header is sufficient.
+        build.include("vendor/iconv-stub");
+    }
+
     let core_sources = [
         "vendor/readstat/src/CKHashTable.c",
         "vendor/readstat/src/readstat_bits.c",
@@ -41,12 +50,24 @@ fn main() {
 
     build.define("HAVE_ZLIB", None);
 
-    if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
+    if !is_windows {
         build.flag("-std=c99");
     }
 
     build.compile("readstat");
 
-    println!("cargo:rustc-link-lib=z");
-    println!("cargo:rustc-link-lib=iconv");
+    if is_windows {
+        // Link zlib from vcpkg (installed as zlib:x64-windows-static in CI)
+        let vcpkg_root = std::env::var("VCPKG_ROOT")
+            .or_else(|_| std::env::var("VCPKG_INSTALLATION_ROOT"))
+            .unwrap_or_else(|_| "C:/vcpkg".to_string());
+        println!(
+            "cargo:rustc-link-search=native={}/installed/x64-windows-static/lib",
+            vcpkg_root
+        );
+        println!("cargo:rustc-link-lib=static=zlib");
+    } else {
+        println!("cargo:rustc-link-lib=z");
+        println!("cargo:rustc-link-lib=iconv");
+    }
 }
