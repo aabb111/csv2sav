@@ -1,18 +1,44 @@
 fn main() {
     tauri_build::build();
 
+    let is_windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+
+    // Build vendored zlib (all platforms, avoids system zlib version differences)
+    let mut zlib_build = cc::Build::new();
+    zlib_build.warnings(false);
+    if !is_windows {
+        zlib_build.flag("-std=c99");
+    }
+    let zlib_sources = [
+        "vendor/zlib/adler32.c",
+        "vendor/zlib/compress.c",
+        "vendor/zlib/crc32.c",
+        "vendor/zlib/deflate.c",
+        "vendor/zlib/infback.c",
+        "vendor/zlib/inffast.c",
+        "vendor/zlib/inflate.c",
+        "vendor/zlib/inftrees.c",
+        "vendor/zlib/trees.c",
+        "vendor/zlib/uncompr.c",
+        "vendor/zlib/zutil.c",
+    ];
+    for src in &zlib_sources {
+        zlib_build.file(src);
+    }
+    zlib_build.include("vendor/zlib");
+    zlib_build.compile("z");
+
+    // Build readstat C library
     let mut build = cc::Build::new();
     build
         .warnings(false)
         .include("vendor/readstat/src")
-        .include("vendor/readstat/src/spss");
-
-    let is_windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+        .include("vendor/readstat/src/spss")
+        .include("vendor/zlib"); // zlib.h for readstat_sav_write.c
 
     if is_windows {
-        // On Windows (MSVC) there is no system iconv.
-        // The writer path never calls iconv() with a non-NULL converter,
-        // so a stub header is sufficient.
+        // Windows has no system iconv; writer path never calls iconv() with a
+        // non-NULL converter so a stub header is sufficient.
         build.include("vendor/iconv-stub");
     }
 
@@ -52,22 +78,9 @@ fn main() {
 
     if !is_windows {
         build.flag("-std=c99");
+        // macOS needs iconv from system
+        println!("cargo:rustc-link-lib=iconv");
     }
 
     build.compile("readstat");
-
-    if is_windows {
-        // Link zlib from vcpkg (installed as zlib:x64-windows-static in CI)
-        let vcpkg_root = std::env::var("VCPKG_ROOT")
-            .or_else(|_| std::env::var("VCPKG_INSTALLATION_ROOT"))
-            .unwrap_or_else(|_| "C:/vcpkg".to_string());
-        println!(
-            "cargo:rustc-link-search=native={}/installed/x64-windows-static/lib",
-            vcpkg_root
-        );
-        println!("cargo:rustc-link-lib=static=zlib");
-    } else {
-        println!("cargo:rustc-link-lib=z");
-        println!("cargo:rustc-link-lib=iconv");
-    }
 }
