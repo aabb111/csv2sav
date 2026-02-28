@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -11,8 +11,10 @@ export function useConvert() {
   const [converting, setConverting] = useState(false);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const cancelledRef = useRef(false);
+  const filesRef = useRef<ConvertFile[]>(files);
+  filesRef.current = files;
 
-  const addFiles = useCallback((paths: string[]) => {
+  function addFiles(paths: string[]) {
     const newFiles: ConvertFile[] = paths
       .filter((p) => p.toLowerCase().endsWith(".csv"))
       .map((inputPath) => ({
@@ -31,23 +33,23 @@ export function useConvert() {
       const unique = newFiles.filter((f) => !existingPaths.has(f.inputPath));
       return [...prev, ...unique];
     });
-  }, []);
+  }
 
-  const removeFile = useCallback((id: string) => {
+  function removeFile(id: string) {
     setFiles((prev) => prev.filter((f) => f.id !== id));
-  }, []);
+  }
 
-  const clearFiles = useCallback(() => {
+  function clearFiles() {
     setFiles([]);
-  }, []);
+  }
 
-  const cancelAll = useCallback(async () => {
+  async function cancelAll() {
     cancelledRef.current = true;
     await invoke("cancel_conversion");
-  }, []);
+  }
 
-  const convertAll = useCallback(async () => {
-    const pendingFiles = files.filter(
+  async function convertAll() {
+    const pendingFiles = filesRef.current.filter(
       (f) => f.status === "pending" || f.status === "error"
     );
     if (pendingFiles.length === 0) return;
@@ -61,7 +63,12 @@ export function useConvert() {
         const { file, current_rows, bytes_read, file_size } = event.payload;
         setFiles((prev) =>
           prev.map((f) => {
-            if (f.inputPath !== file || f.status === "success" || f.status === "error") return f;
+            if (
+              f.inputPath !== file ||
+              f.status === "success" ||
+              f.status === "error"
+            )
+              return f;
 
             const progress =
               file_size > 0
@@ -93,7 +100,7 @@ export function useConvert() {
       const defaultOutput = file.inputPath.replace(/\.csv$/i, ".zsav");
       const outputPath = await save({
         defaultPath: defaultOutput,
-        filters: [{ name: "SPSS (compressed)", extensions: ["zsav"] }],
+        filters: [{ name: "SPSS ZSAV", extensions: ["zsav"] }],
         title: `保存 ${file.fileName} 为 ZSAV`,
       });
 
@@ -158,7 +165,7 @@ export function useConvert() {
     unlistenRef.current?.();
     unlistenRef.current = null;
     setConverting(false);
-  }, [files]);
+  }
 
   return {
     files,

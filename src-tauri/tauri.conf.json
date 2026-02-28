@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "CSV → SAV 转换工具",
+        "title": "CSV → ZSAV 转换工具",
         "width": 860,
         "height": 720
       }

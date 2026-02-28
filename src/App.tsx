@@ -20,9 +20,9 @@ function App() {
       <div className="mx-auto max-w-2xl space-y-6">
         <Card>
           <CardHeader>
-            <CardTitle className="text-2xl">CSV → SAV 转换工具</CardTitle>
+            <CardTitle className="text-2xl">CSV → ZSAV 转换工具</CardTitle>
             <CardDescription>
-              将 CSV 文件转换为 SPSS SAV 格式，支持大文件流式处理
+              将 CSV 文件转换为 SPSS ZSAV 格式，支持大文件流式处理
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">

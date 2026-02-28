@@ -1,5 +1,6 @@
 mod converter;
-mod sav_writer;
+mod readstat_sys;
+mod readstat_writer;
 mod schema;
 
 use std::path::Path;
@@ -24,15 +25,13 @@ struct ConvertResult {
     total_rows: usize,
     success: bool,
     error: Option<String>,
-    /// Columns whose values were truncated to 32767 bytes in the output.
     truncated_cols: Vec<String>,
 }
 
 #[derive(Clone)]
 struct CancelFlag(Arc<AtomicBool>);
 
-// Scan all rows to infer schema, avoiding truncation from undersampling.
-const SAMPLE_ROWS: usize = usize::MAX;
+const SAMPLE_ROWS: usize = 10_000;
 
 fn emit_progress(app: &AppHandle, file: &str, current_rows: usize, bytes_read: u64, file_size: u64) {
     let _ = app.emit(
@@ -84,7 +83,7 @@ async fn convert_csv_to_sav(
         let truncated_cols = csv_schema.truncated_cols.clone();
         emit_progress(&app, &file_name, 0, 0, file_size);
 
-        let actual_rows = converter::convert_csv_to_sav(
+        let actual_rows = converter::convert_csv_to_zsav(
             input_p,
             output_p,
             &csv_schema,

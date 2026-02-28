@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const BUF_SIZE: usize = 256 * 1024;
 /// SPSS Very Long String max: 32767 bytes per logical variable.
 pub const MAX_STRING_WIDTH: usize = 32767;
+/// Fixed declared width for all non-numeric string columns.
+const STRING_DECLARED_WIDTH: usize = 3000;
 
 #[derive(Debug, Clone)]
 pub enum ColType {
@@ -46,7 +48,11 @@ impl ColInfo {
         if self.is_numeric {
             ColType::Numeric
         } else {
-            let width = self.max_byte_len.max(1).min(MAX_STRING_WIDTH);
+            let width = if self.max_byte_len <= STRING_DECLARED_WIDTH {
+                STRING_DECLARED_WIDTH
+            } else {
+                self.max_byte_len.min(MAX_STRING_WIDTH)
+            };
             ColType::String(width)
         }
     }
@@ -59,6 +65,25 @@ pub struct CsvSchema {
     pub file_size: u64,
     /// Column names whose observed values exceed MAX_STRING_WIDTH and will be truncated.
     pub truncated_cols: Vec<String>,
+}
+
+/// Counts data rows using the CSV parser so quoted multi-line fields are handled correctly.
+pub fn count_rows(path: &Path, cancelled: &AtomicBool) -> Result<usize, String> {
+    let file = File::open(path).map_err(|e| format!("Failed to open CSV: {e}"))?;
+    let buf = BufReader::with_capacity(BUF_SIZE, file);
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(buf);
+
+    let mut count = 0usize;
+    for result in reader.records() {
+        result.map_err(|e| format!("CSV read error at row {}: {e}", count + 1))?;
+        count += 1;
+        if count % 100_000 == 0 && cancelled.load(Ordering::Relaxed) {
+            return Err("Cancelled".to_string());
+        }
+    }
+    Ok(count)
 }
 
 pub fn infer_schema(
