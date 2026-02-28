@@ -1,7 +1,42 @@
-# Tauri + React + Typescript
+# csv2sav
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+将 CSV 文件转换为 SPSS ZSAV 格式的桌面工具，支持 macOS 和 Windows。
 
-## Recommended IDE Setup
+## 下载
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+前往 [Releases](https://github.com/aabb111/csv2sav/releases) 页面下载最新版本：
+
+- **macOS**：下载 `.dmg` 文件，安装后打开
+- **Windows**：下载 `.msi` 文件，安装后打开
+
+## 使用方法
+
+### 1. 添加文件
+
+将 CSV 文件**拖放**到窗口中央的虚线区域，或点击**选择文件**按钮通过文件选择器添加。支持同时添加多个文件。
+
+### 2. 开始转换
+
+点击**开始转换**按钮。每个文件会依次弹出保存对话框，选择输出位置后开始转换。转换过程中会显示实时进度条。
+
+### 3. 取消转换
+
+转换进行中点击**取消**按钮可中止当前及后续文件的转换，已转换完成的文件不受影响。
+
+## 转换说明
+
+| 项目 | 说明 |
+|------|------|
+| 输入格式 | UTF-8 编码的 CSV（支持带引号的多行字段） |
+| 输出格式 | SPSS ZSAV（zlib 压缩，`$FL3` 格式） |
+| 列类型推断 | 采样前 10,000 行，能解析为数字的列自动设为数值型，其余为字符串型 |
+| 字符串宽度 | 默认声明宽度 3000 字节，最大支持 32,767 字节（SPSS VLS 上限） |
+| 超长截断 | 若某列实际内容超过 32,767 字节，截断并在结果中提示 |
+| 大文件支持 | 采用流式两遍处理（先计行数，再写入），理论支持 10GB+ 文件 |
+| 变量命名 | SAV 内部变量名为 `V1`、`V2`…，原始 CSV 列名作为变量标签保留 |
+
+## 注意事项
+
+- CSV 文件必须有标题行（第一行为列名）
+- 输出文件扩展名为 `.zsav`，可直接用 SPSS 26+ 打开
+- 转换结果可用 Python `pyreadstat` 库验证：`pyreadstat.read_sav("output.zsav")`
