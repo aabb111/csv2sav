@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const BUF_SIZE: usize = 256 * 1024;
 /// SPSS Very Long String max: 32767 bytes per logical variable.
 pub const MAX_STRING_WIDTH: usize = 32767;
-/// Fixed declared width for all non-numeric string columns.
-const STRING_DECLARED_WIDTH: usize = 3000;
+/// Minimum declared width for string columns so short strings still have some room.
+const MIN_STRING_WIDTH: usize = 64;
 
 #[derive(Debug, Clone)]
 pub enum ColType {
@@ -19,7 +19,7 @@ pub enum ColType {
 #[derive(Debug, Clone)]
 pub struct ColInfo {
     is_numeric: bool,
-    max_byte_len: usize,
+    pub max_byte_len: usize,
 }
 
 impl ColInfo {
@@ -30,7 +30,7 @@ impl ColInfo {
         }
     }
 
-    pub fn observe(&mut self, value: &str) {
+    pub fn observe_type(&mut self, value: &str) {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             return;
@@ -38,7 +38,10 @@ impl ColInfo {
         if self.is_numeric && trimmed.parse::<f64>().is_err() {
             self.is_numeric = false;
         }
-        let byte_len = trimmed.len();
+    }
+
+    pub fn observe_width(&mut self, value: &str) {
+        let byte_len = value.trim().len();
         if byte_len > self.max_byte_len {
             self.max_byte_len = byte_len;
         }
@@ -48,11 +51,7 @@ impl ColInfo {
         if self.is_numeric {
             ColType::Numeric
         } else {
-            let width = if self.max_byte_len <= STRING_DECLARED_WIDTH {
-                STRING_DECLARED_WIDTH
-            } else {
-                self.max_byte_len.min(MAX_STRING_WIDTH)
-            };
+            let width = self.max_byte_len.max(MIN_STRING_WIDTH).min(MAX_STRING_WIDTH);
             ColType::String(width)
         }
     }
@@ -63,12 +62,17 @@ pub struct CsvSchema {
     pub headers: Vec<String>,
     pub col_types: Vec<ColType>,
     pub file_size: u64,
+    pub row_count: usize,
     /// Column names whose observed values exceed MAX_STRING_WIDTH and will be truncated.
     pub truncated_cols: Vec<String>,
 }
 
-/// Counts data rows using the CSV parser so quoted multi-line fields are handled correctly.
-pub fn count_rows(path: &Path, cancelled: &AtomicBool) -> Result<usize, String> {
+/// Full scan: counts rows and records the actual max byte width for each column.
+pub fn scan_rows_and_widths(
+    path: &Path,
+    col_infos: &mut [ColInfo],
+    cancelled: &AtomicBool,
+) -> Result<usize, String> {
     let file = File::open(path).map_err(|e| format!("Failed to open CSV: {e}"))?;
     let buf = BufReader::with_capacity(BUF_SIZE, file);
     let mut reader = csv::ReaderBuilder::new()
@@ -77,8 +81,16 @@ pub fn count_rows(path: &Path, cancelled: &AtomicBool) -> Result<usize, String> 
 
     let mut count = 0usize;
     for result in reader.records() {
-        result.map_err(|e| format!("CSV read error at row {}: {e}", count + 1))?;
+        let record =
+            result.map_err(|e| format!("CSV read error at row {}: {e}", count + 1))?;
         count += 1;
+
+        for (i, field) in record.iter().enumerate() {
+            if i < col_infos.len() {
+                col_infos[i].observe_width(field);
+            }
+        }
+
         if count % 100_000 == 0 && cancelled.load(Ordering::Relaxed) {
             return Err("Cancelled".to_string());
         }
@@ -122,7 +134,7 @@ pub fn infer_schema(
 
         for (i, field) in record.iter().enumerate() {
             if i < col_infos.len() {
-                col_infos[i].observe(field);
+                col_infos[i].observe_type(field);
             }
         }
 
@@ -130,6 +142,9 @@ pub fn infer_schema(
             break;
         }
     }
+
+    // Full scan to get exact row count and actual max widths
+    let row_count = scan_rows_and_widths(path, &mut col_infos, cancelled)?;
 
     let truncated_cols: Vec<String> = headers
         .iter()
@@ -144,6 +159,7 @@ pub fn infer_schema(
         headers,
         col_types,
         file_size,
+        row_count,
         truncated_cols,
     })
 }

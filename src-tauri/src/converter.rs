@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::readstat_writer::{ColDef, ColType, Value, Writer};
-use crate::schema::{self, ColType as SchemaColType, CsvSchema};
+use crate::schema::{ColType as SchemaColType, CsvSchema};
 
 const CSV_BUF_SIZE: usize = 512 * 1024;
 const PROGRESS_INTERVAL: usize = 10_000;
@@ -68,9 +68,7 @@ fn make_col_defs(schema: &CsvSchema) -> Vec<ColDef> {
         .collect()
 }
 
-/// Converts CSV to ZSAV using two passes:
-/// 1. Count rows via CSV parser (handles quoted multi-line fields).
-/// 2. Stream rows into ZSAV writer with exact row count.
+/// Converts CSV to ZSAV. Row count and column widths are already known from schema scanning.
 pub fn convert_csv_to_zsav(
     input: &Path,
     output: &Path,
@@ -78,16 +76,10 @@ pub fn convert_csv_to_zsav(
     cancelled: &AtomicBool,
     on_progress: &dyn Fn(usize, u64, u64),
 ) -> Result<usize, String> {
-    let total_rows = schema::count_rows(input, cancelled)?;
-
-    if cancelled.load(Ordering::Relaxed) {
-        return Err("Cancelled".to_string());
-    }
-
     let col_defs = make_col_defs(csv_schema);
     let out_file =
         File::create(output).map_err(|e| format!("Failed to create ZSAV file: {e}"))?;
-    let mut writer = Writer::new_zsav(out_file, &col_defs, total_rows)
+    let mut writer = Writer::new_zsav(out_file, &col_defs, csv_schema.row_count)
         .map_err(|e| format!("Failed to init writer: {e}"))?;
 
     let csv_file =

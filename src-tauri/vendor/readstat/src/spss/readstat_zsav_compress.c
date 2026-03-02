@@ -16,7 +16,7 @@ zsav_ctx_t *zsav_ctx_init(size_t max_row_len, int64_t offset) {
     ctx->uncompressed_block_size = 0x3FF000;
     ctx->zheader_ofs = offset;
 
-    ctx->compression_level = Z_DEFAULT_COMPRESSION;
+    ctx->compression_level = Z_BEST_SPEED;
 
     return ctx;
 }
